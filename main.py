@@ -1,8 +1,7 @@
 """
 Roundabout Vehicle Tracker
 ==========================
-Tracks vehicles in drone footage of a roundabout and classifies
-maneuvers (left turn, right turn, straight, U-turn) based on
+Tracks vehicles in drone footage of a roundabout and records results based on
 which arm each vehicle enters and exits from.
 
 Requirements:
@@ -72,17 +71,6 @@ ARM_POLYGONS = {
 ARM_ORDER = ["North", "East", "South", "West", "Extra"]
 
 
-# ---------------------------------------------------------------------------
-# Maneuver Classification
-# ---------------------------------------------------------------------------
-
-class Maneuver(str, Enum):
-    RIGHT  = "Right Turn"
-    STRAIGHT = "Straight"
-    LEFT   = "Left Turn"
-    UTURN  = "U-Turn"
-    UNKNOWN = "Unknown"
-
 
 # ---------------------------------------------------------------------------
 # Vehicle Journey Tracking
@@ -94,7 +82,6 @@ class VehicleJourney:
     track_id: int
     entry_arm: str | None = None
     exit_arm:  str | None = None
-    maneuver:  Maneuver   = Maneuver.UNKNOWN
     last_seen_frame: int  = 0
     completed: bool       = False
 
@@ -188,7 +175,6 @@ class RoundaboutTracker:
             elif arm != journey.entry_arm and journey.exit_arm is None:
                 # Different arm → record as exit and classify
                 journey.exit_arm = arm
-                # journey.maneuver = classify_maneuver(journey.entry_arm, arm)
                 journey.completed = True
                 print(
                     f"[Frame {frame_idx}] Vehicle {tid}: "
@@ -211,17 +197,6 @@ class RoundaboutTracker:
             else:
                 labels.append(f"#{tid}")
         return labels
-
-    def _draw_hud(self, frame: np.ndarray) -> np.ndarray:
-        """Draw maneuver count summary in the top-left corner."""
-        y = 30
-        cv2.putText(frame, "Maneuver Counts", (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        for maneuver, count in self.maneuver_counts.items():
-            y += 25
-            cv2.putText(frame, f"  {maneuver.value}: {count}", (10, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1)
-        return frame
 
     # ------------------------------------------------------------------
     # Main Loop
