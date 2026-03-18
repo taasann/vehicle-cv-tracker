@@ -103,7 +103,7 @@ class RoundaboutTracker:
         self.model = YOLO(MODEL_PATH)
 
         # ByteTrack tracker
-        self.tracker = sv.ByteTrack()
+        self.tracker = sv.ByteTrack(lost_track_buffer=90)
 
         # Build PolygonZone objects for each arm
         self.zones: dict[str, sv.PolygonZone] = {}
@@ -191,6 +191,18 @@ class RoundaboutTracker:
                     f"{journey.entry_arm} → {journey.exit_arm} "
                 )
 
+    def _cleanup_journeys(self, frame_idx: int) -> None:
+        """Remove journeys that have not been seen for TRACK_TIMEOUT_FRAMES frames."""
+        timed_out = [
+            tid
+            for tid, journey in self.journeys.items()
+            if frame_idx - journey.last_seen_frame > TRACK_TIMEOUT_FRAMES
+        ]
+        for tid in timed_out:
+            print("Deleting journey", tid)
+
+            del self.journeys[tid]
+
     # ------------------------------------------------------------------
     # Annotation
     # ------------------------------------------------------------------
@@ -265,6 +277,7 @@ class RoundaboutTracker:
             arm_map    = self._arm_containing(detections)
             active_ids = set(int(t) for t in (detections.tracker_id if detections.tracker_id is not None else []))
             self._update_journeys(arm_map, active_ids, frame_idx)
+            self._cleanup_journeys(frame_idx)
 
             # --- Record positions ---
             for i, tid in enumerate(detections.tracker_id if detections.tracker_id is not None else []):
