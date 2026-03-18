@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
@@ -34,7 +35,7 @@ MODEL_PATH   = "yolo26x.pt"
 VEHICLE_CLASS_IDS = [2, 3, 5, 7]
 
 # Confidence threshold for detections
-CONFIDENCE_THRESHOLD = 0.3
+CONFIDENCE_THRESHOLD = 0.1
 
 # How many frames a vehicle must be absent before its journey is "closed"
 TRACK_TIMEOUT_FRAMES = 120
@@ -60,12 +61,14 @@ TRACK_TIMEOUT_FRAMES = 120
 #          ARM 2 (South)
 
 ARM_POLYGONS = {
-    "North": np.array([[973, 260], [1200, 440], [1312, 221], [1162, 129], [1096, 218], [974, 260]]),
-    "East": np.array([[1233, 554], [1099, 754], [1181, 764], [1318, 879], [1417, 776], [1336, 701], [1268, 624], [1235, 556]]),
-    "South": np.array([[679, 758], [866, 761], [927, 762], [1027, 800], [970, 855], [949, 918], [942, 1011], [797, 1012], [797, 881], [780, 837], [743, 794], [679, 760]]),
-    "West": np.array([[727, 506], [766, 657], [686, 763], [623, 758], [468, 769], [456, 642], [574, 628], [634, 603], [725, 513]]),
-    "Extra": np.array([[559, 257], [648, 147], [794, 244], [913, 274], [809, 355], [721, 438], [685, 354], [560, 260]]),
+    "NE": np.array([[973, 260], [1200, 440], [1312, 221], [1162, 129], [1096, 218], [974, 260]]),
+    "SE": np.array([[1233, 554], [1099, 754], [1181, 764], [1318, 879], [1417, 776], [1336, 701], [1268, 624], [1235, 556]]),
+    "S": np.array([[679, 758], [866, 761], [927, 762], [1027, 800], [970, 855], [949, 918], [942, 1011], [797, 1012], [797, 881], [780, 837], [743, 794], [679, 760]]),
+    "W": np.array([[727, 506], [766, 657], [686, 763], [623, 758], [468, 769], [456, 642], [574, 628], [634, 603], [725, 513]]),
+    "NW": np.array([[559, 257], [648, 147], [794, 244], [913, 274], [809, 355], [721, 438], [685, 354], [560, 260]]),
 }
+
+ZONE_COLORS = ["#FF5733", "#33FF57", "#3357FF", "#FF33F5", "#FF0000"]
 
 # Clockwise ordering of arms — used to determine turn direction
 ARM_ORDER = ["North", "East", "South", "West", "Extra"]
@@ -84,6 +87,7 @@ class VehicleJourney:
     exit_arm:  str | None = None
     last_seen_frame: int  = 0
     completed: bool       = False
+    positions: list[tuple[int, int]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +124,14 @@ class RoundaboutTracker:
             )
             for (name, zone), color in zip(
                 self.zones.items(),
-                ["#FF5733", "#33FF57", "#3357FF", "#FF33F5", "#FF0000"],
+                ZONE_COLORS,
             )
+        }
+
+        # BGR color per arm for path drawing
+        self.arm_colors: dict[str, tuple[int, int, int]] = {
+            name: tuple(int(hex_color.lstrip("#")[i:i+2], 16) for i in (4, 2, 0))
+            for name, hex_color in zip(ARM_POLYGONS.keys(), ZONE_COLORS)
         }
 
     # ------------------------------------------------------------------
@@ -191,12 +201,26 @@ class RoundaboutTracker:
             tid = int(tid)
             journey = self.journeys.get(tid)
             if journey and journey.completed:
-                labels.append(f"#{tid} {journey.entry_arm} → {journey.exit_arm}")
+                labels.append(f"#{tid} from {journey.entry_arm} to {journey.exit_arm}")
             elif journey and journey.entry_arm:
                 labels.append(f"#{tid} from {journey.entry_arm}")
             else:
                 labels.append(f"#{tid}")
         return labels
+
+    def _draw_paths(self, frame: np.ndarray, frame_idx) -> np.ndarray:
+        for journey in self.journeys.values():
+            pts = journey.positions
+            if len(pts) < 2 or frame_idx - journey.last_seen_frame > TRACK_TIMEOUT_FRAMES:
+                continue
+            for j in range(1, len(pts)):
+                if journey.entry_arm is None:
+                    color = (0, 255, 255)
+                else:
+                    color = self.arm_colors.get(journey.entry_arm, (0, 255, 255))
+
+                cv2.line(frame, pts[j-1], pts[j], color, 2)
+        return frame
 
     # ------------------------------------------------------------------
     # Main Loop
@@ -216,6 +240,7 @@ class RoundaboutTracker:
         )
 
         frame_idx = 0
+        start_time = time.time()
         print(f"Processing {self.source_path} ...")
 
         while True:
@@ -241,7 +266,16 @@ class RoundaboutTracker:
             active_ids = set(int(t) for t in (detections.tracker_id if detections.tracker_id is not None else []))
             self._update_journeys(arm_map, active_ids, frame_idx)
 
+            # --- Record positions ---
+            for i, tid in enumerate(detections.tracker_id if detections.tracker_id is not None else []):
+                tid = int(tid)
+                x1, y1, x2, y2 = detections.xyxy[i]
+                cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+                if tid in self.journeys:
+                    self.journeys[tid].positions.append((cx, cy))
+
             # --- Annotate Frame ---
+            frame = self._draw_paths(frame, frame_idx)
             for name, annotator in self.zone_annotators.items():
                 frame = annotator.annotate(scene=frame)
 
@@ -253,14 +287,13 @@ class RoundaboutTracker:
             # frame  = self._draw_hud(frame)
 
             writer.write(frame)
+
+            if frame_idx > 0 and frame_idx % fps == 0:
+                duration = fps / (time.time() - start_time)
+                start_time = time.time()
+                print("Frame %d, t=%.1f d=%.1f" % (frame_idx, frame_idx / fps, duration))
+
             frame_idx += 1
-
-            if frame_idx % fps == 0:
-                print("Frame %d, t=%.1f" % (frame_idx, frame_idx / fps))
-
-            if frame_idx / fps >= 60:
-                print("60 seconds processed - exiting")
-                break
 
         cap.release()
         writer.release()
