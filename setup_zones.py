@@ -16,6 +16,7 @@ import argparse
 import json
 
 import cv2
+import numpy as np
 
 from tracker import DEFAULT_SOURCE_VIDEO, PROJECT_FILE
 
@@ -36,6 +37,68 @@ ZONE_COLOR_PALETTE = [
 ]
 
 
+def hex_to_bgr(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (b, g, r)
+
+
+def draw_status_bar(
+    frame: np.ndarray,
+    arm_name: str,
+    arm_color_bgr: tuple[int, int, int],
+    n_points: int,
+    arm_idx: int,
+    total_arms: int,
+) -> None:
+    """Render a two-line status bar at the bottom of frame (in-place)."""
+    h, w = frame.shape[:2]
+    bar_height = 60
+    pad = 8
+
+    # Semi-transparent dark backdrop
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, h - bar_height), (w, h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+
+    # Line 1: color swatch + arm name + progress
+    swatch_x, swatch_y = pad, h - bar_height + pad
+    cv2.rectangle(frame, (swatch_x, swatch_y), (swatch_x + 16, swatch_y + 16), arm_color_bgr, -1)
+    label = f"Zone {arm_idx + 1}/{total_arms}: {arm_name}   ({n_points} point{'s' if n_points != 1 else ''} placed)"
+    cv2.putText(frame, label, (swatch_x + 22, swatch_y + 13),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, arm_color_bgr, 1, cv2.LINE_AA)
+
+    # Line 2: instructions
+    hint = "Click: add vertex    ENTER: confirm zone (need >=3)    ESC: quit"
+    cv2.putText(frame, hint, (pad, h - pad),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+
+
+def draw_current_polygon(
+    frame: np.ndarray,
+    points: list[tuple[int, int]],
+    color_bgr: tuple[int, int, int],
+) -> None:
+    """Draw in-progress polygon points and edges onto frame (in-place)."""
+    for i, pt in enumerate(points):
+        cv2.circle(frame, pt, 5, color_bgr, -1)
+        if i > 0:
+            cv2.line(frame, points[i - 1], pt, color_bgr, 2)
+    # Close the polygon preview once we have enough points
+    if len(points) >= 3:
+        cv2.line(frame, points[-1], points[0], color_bgr, 1)
+
+
+def draw_completed_zone(
+    background: np.ndarray,
+    pts: list[list[int]],
+    color_bgr: tuple[int, int, int],
+) -> None:
+    """Draw a finished zone outline onto the background frame (in-place)."""
+    poly = np.array(pts, dtype=np.int32)
+    cv2.polylines(background, [poly], isClosed=True, color=color_bgr, thickness=2)
+
+
 def setup_zones_interactively(video_path: str, project_path: str) -> None:
     """
     Opens the first frame of the video and lets you click to define polygon
@@ -43,57 +106,75 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
     Saves the resulting zones to project_path as JSON.
     """
     cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
+    ret, base_frame = cap.read()
     cap.release()
     if not ret:
         print("Could not read video.")
         return
 
+    # background accumulates completed zone outlines between arms
+    background = base_frame.copy()
+
     points: list[tuple[int, int]] = []
-    clone = frame.copy()
-
-    def mouse_callback(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            points.append((x, y))
-            cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
-            if len(points) > 1:
-                cv2.line(frame, points[-2], points[-1], (0, 255, 0), 2)
-            cv2.imshow("Zone Setup", frame)
-
-    cv2.namedWindow("Zone Setup")
-    cv2.setMouseCallback("Zone Setup", mouse_callback)
-    cv2.imshow("Zone Setup", frame)
-
-    print("Click to define polygon vertices. Press ENTER to record, ESC to quit.")
     arm_idx = 0
     arm_names = DEFAULT_ARM_NAMES
     zones: dict[str, dict] = {}
 
+    # current drawing state (mutated by mouse callback)
+    state = {"redraw": False}
+
+    def mouse_callback(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((x, y))
+            state["redraw"] = True
+
+    cv2.namedWindow("Zone Setup")
+    cv2.setMouseCallback("Zone Setup", mouse_callback)
+
     while arm_idx < len(arm_names):
-        color = ZONE_COLOR_PALETTE[arm_idx % len(ZONE_COLOR_PALETTE)]
-        print(f"\nDefine zone for: {arm_names[arm_idx]} (color: {color})")
+        color_hex = ZONE_COLOR_PALETTE[arm_idx % len(ZONE_COLOR_PALETTE)]
+        color_bgr = hex_to_bgr(color_hex)
         points.clear()
-        frame = clone.copy()
-        cv2.imshow("Zone Setup", frame)
+        state["redraw"] = True
 
         while True:
-            key = cv2.waitKey(1) & 0xFF
+            if state["redraw"]:
+                frame = background.copy()
+                draw_current_polygon(frame, points, color_bgr)
+                draw_status_bar(frame, arm_names[arm_idx], color_bgr,
+                                len(points), arm_idx, len(arm_names))
+                cv2.imshow("Zone Setup", frame)
+                state["redraw"] = False
+
+            key = cv2.waitKey(20) & 0xFF
             if key == 13 and len(points) >= 3:  # ENTER
                 zones[arm_names[arm_idx]] = {
                     "polygon": [list(p) for p in points],
-                    "color": color,
+                    "color": color_hex,
                 }
+                draw_completed_zone(background, zones[arm_names[arm_idx]]["polygon"], color_bgr)
                 arm_idx += 1
                 break
             elif key == 27:  # ESC
                 cv2.destroyAllWindows()
                 return
 
-    cv2.destroyAllWindows()
-
     with open(project_path, "w") as f:
         json.dump({"zones": zones}, f, indent=2)
-    print(f"\nSaved zones to {project_path}")
+
+    # Show save confirmation in the window
+    frame = background.copy()
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, h - 60), (w, h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    cv2.putText(frame, f"Saved zones to {project_path}",
+                (8, h - 34), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 1, cv2.LINE_AA)
+    cv2.putText(frame, "Press any key to close.",
+                (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+    cv2.imshow("Zone Setup", frame)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
