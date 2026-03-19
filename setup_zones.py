@@ -20,7 +20,7 @@ import numpy as np
 
 from tracker import DEFAULT_SOURCE_VIDEO, PROJECT_FILE
 
-DEFAULT_ARM_NAMES = ["North", "East", "South", "West"]
+DEFAULT_ARM_NAMES = ["NE", "E", "S", "W", "NW"]
 
 # 10 perceptually distinct colors for zone annotation
 ZONE_COLOR_PALETTE = [
@@ -50,6 +50,7 @@ def draw_status_bar(
     n_points: int,
     arm_idx: int,
     total_arms: int,
+    polygon_role: str = "Zone",
 ) -> None:
     """Render a two-line status bar at the bottom of frame (in-place)."""
     h, w = frame.shape[:2]
@@ -64,12 +65,15 @@ def draw_status_bar(
     # Line 1: color swatch + arm name + progress
     swatch_x, swatch_y = pad, h - bar_height + pad
     cv2.rectangle(frame, (swatch_x, swatch_y), (swatch_x + 16, swatch_y + 16), arm_color_bgr, -1)
-    label = f"Zone {arm_idx + 1}/{total_arms}: {arm_name}   ({n_points} point{'s' if n_points != 1 else ''} placed)"
+    label = (
+        f"Zone {arm_idx + 1}/{total_arms}: {arm_name} — {polygon_role} polygon"
+        f"   ({n_points} point{'s' if n_points != 1 else ''} placed)"
+    )
     cv2.putText(frame, label, (swatch_x + 22, swatch_y + 13),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, arm_color_bgr, 1, cv2.LINE_AA)
 
     # Line 2: instructions
-    hint = "Click: add vertex    ENTER: confirm zone (need >=3)    ESC: quit"
+    hint = "Click: add vertex    ENTER: confirm polygon (need >=3)    ESC: quit"
     cv2.putText(frame, hint, (pad, h - pad),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
 
@@ -93,10 +97,11 @@ def draw_completed_zone(
     background: np.ndarray,
     pts: list[list[int]],
     color_bgr: tuple[int, int, int],
+    thickness: int = 2,
 ) -> None:
     """Draw a finished zone outline onto the background frame (in-place)."""
     poly = np.array(pts, dtype=np.int32)
-    cv2.polylines(background, [poly], isClosed=True, color=color_bgr, thickness=2)
+    cv2.polylines(background, [poly], isClosed=True, color=color_bgr, thickness=thickness)
 
 
 def setup_zones_interactively(video_path: str, project_path: str) -> None:
@@ -134,30 +139,39 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
     while arm_idx < len(arm_names):
         color_hex = ZONE_COLOR_PALETTE[arm_idx % len(ZONE_COLOR_PALETTE)]
         color_bgr = hex_to_bgr(color_hex)
-        points.clear()
-        state["redraw"] = True
+        arm_name = arm_names[arm_idx]
+        arm_polygons: dict[str, list] = {}
 
-        while True:
-            if state["redraw"]:
-                frame = background.copy()
-                draw_current_polygon(frame, points, color_bgr)
-                draw_status_bar(frame, arm_names[arm_idx], color_bgr,
-                                len(points), arm_idx, len(arm_names))
-                cv2.imshow("Zone Setup", frame)
-                state["redraw"] = False
+        for polygon_role in ("Entry", "Exit"):
+            points.clear()
+            state["redraw"] = True
 
-            key = cv2.waitKey(20) & 0xFF
-            if key == 13 and len(points) >= 3:  # ENTER
-                zones[arm_names[arm_idx]] = {
-                    "polygon": [list(p) for p in points],
-                    "color": color_hex,
-                }
-                draw_completed_zone(background, zones[arm_names[arm_idx]]["polygon"], color_bgr)
-                arm_idx += 1
-                break
-            elif key == 27:  # ESC
-                cv2.destroyAllWindows()
-                return
+            while True:
+                if state["redraw"]:
+                    frame = background.copy()
+                    draw_current_polygon(frame, points, color_bgr)
+                    draw_status_bar(frame, arm_name, color_bgr,
+                                    len(points), arm_idx, len(arm_names),
+                                    polygon_role=polygon_role)
+                    cv2.imshow("Zone Setup", frame)
+                    state["redraw"] = False
+
+                key = cv2.waitKey(20) & 0xFF
+                if key == 13 and len(points) >= 3:  # ENTER
+                    arm_polygons[polygon_role] = [list(p) for p in points]
+                    thickness = 2 if polygon_role == "Entry" else 1
+                    draw_completed_zone(background, arm_polygons[polygon_role], color_bgr, thickness)
+                    break
+                elif key == 27:  # ESC
+                    cv2.destroyAllWindows()
+                    return
+
+        zones[arm_name] = {
+            "entry_polygon": arm_polygons["Entry"],
+            "exit_polygon": arm_polygons["Exit"],
+            "color": color_hex,
+        }
+        arm_idx += 1
 
     with open(project_path, "w") as f:
         json.dump({"zones": zones}, f, indent=2)

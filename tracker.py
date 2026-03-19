@@ -49,7 +49,9 @@ TRACK_TIMEOUT_FRAMES = 120
 def load_zones(path: str) -> dict[str, dict]:
     """Load arm zones from a project.json file.
 
-    Returns a dict mapping arm name to {"polygon": np.ndarray, "color": str}.
+    Returns a dict mapping arm name to:
+      {"entry_polygon": np.ndarray, "exit_polygon": np.ndarray, "color": str}.
+    Falls back to "polygon" for backward compatibility with old project files.
     """
     try:
         with open(path) as f:
@@ -59,7 +61,12 @@ def load_zones(path: str) -> dict[str, dict]:
         sys.exit(1)
     return {
         name: {
-            "polygon": np.array(zone["polygon"], dtype=np.int32),
+            "entry_polygon": np.array(
+                zone.get("entry_polygon") or zone["polygon"], dtype=np.int32
+            ),
+            "exit_polygon": np.array(
+                zone.get("exit_polygon") or zone["polygon"], dtype=np.int32
+            ),
             "color": zone["color"],
         }
         for name, zone in data["zones"].items()
@@ -98,9 +105,13 @@ class VehicleTracker:
         # ByteTrack tracker
         self.tracker = sv.ByteTrack(lost_track_buffer=90)
 
-        # Build PolygonZone objects for each arm
-        self.zones: dict[str, sv.PolygonZone] = {
-            name: sv.PolygonZone(polygon=z["polygon"])
+        # Build PolygonZone objects for entry and exit polygons per arm
+        self.entry_zones: dict[str, sv.PolygonZone] = {
+            name: sv.PolygonZone(polygon=z["entry_polygon"])
+            for name, z in zone_data.items()
+        }
+        self.exit_zones: dict[str, sv.PolygonZone] = {
+            name: sv.PolygonZone(polygon=z["exit_polygon"])
             for name, z in zone_data.items()
         }
 
@@ -110,11 +121,19 @@ class VehicleTracker:
         # Annotators for visualisation
         self.box_annotator   = sv.BoxAnnotator(thickness=2)
         self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
-        self.zone_annotators = {
+        self.entry_zone_annotators = {
             name: sv.PolygonZoneAnnotator(
-                zone=self.zones[name],
+                zone=self.entry_zones[name],
                 color=sv.Color.from_hex(z["color"]),
                 thickness=2,
+            )
+            for name, z in zone_data.items()
+        }
+        self.exit_zone_annotators = {
+            name: sv.PolygonZoneAnnotator(
+                zone=self.exit_zones[name],
+                color=sv.Color.from_hex(z["color"]),
+                thickness=1,
             )
             for name, z in zone_data.items()
         }
@@ -129,10 +148,21 @@ class VehicleTracker:
     # Zone Logic
     # ------------------------------------------------------------------
 
-    def _arm_containing(self, detections: sv.Detections) -> dict[int, str]:
-        """Return a mapping of {track_id: arm_name} for detected vehicles."""
+    def _arms_in_entry(self, detections: sv.Detections) -> dict[int, str]:
+        """Return {track_id: arm_name} for vehicles inside an entry polygon."""
         result = {}
-        for arm_name, zone in self.zones.items():
+        for arm_name, zone in self.entry_zones.items():
+            mask = zone.trigger(detections=detections)
+            for i, in_zone in enumerate(mask):
+                if in_zone and detections.tracker_id is not None:
+                    tid = int(detections.tracker_id[i])
+                    result[tid] = arm_name
+        return result
+
+    def _arms_in_exit(self, detections: sv.Detections) -> dict[int, str]:
+        """Return {track_id: arm_name} for vehicles inside an exit polygon."""
+        result = {}
+        for arm_name, zone in self.exit_zones.items():
             mask = zone.trigger(detections=detections)
             for i, in_zone in enumerate(mask):
                 if in_zone and detections.tracker_id is not None:
@@ -146,17 +176,18 @@ class VehicleTracker:
 
     def _update_journeys(
         self,
-        arm_map: dict[int, str],
+        entry_map: dict[int, str],
+        exit_map: dict[int, str],
         active_ids: set[int],
         frame_idx: int,
     ) -> None:
         """
-        Update each vehicle's journey state based on which zone it's in.
+        Update each vehicle's journey state based on which zones it's in.
 
         State transitions:
-          - Vehicle enters a zone and has no entry arm → record entry arm
-          - Vehicle enters a zone AND already has an entry arm AND the zone is
-            different → record exit arm and finalise maneuver
+          - Vehicle is in an entry polygon and has no entry arm → record entry arm
+          - Vehicle is in an exit polygon AND already has an entry arm → record
+            exit arm and finalise maneuver (u-turns allowed: exit may equal entry)
         """
         # Initialise journeys for new track IDs
         for tid in active_ids:
@@ -164,17 +195,18 @@ class VehicleTracker:
                 self.journeys[tid] = VehicleJourney(track_id=tid)
             self.journeys[tid].last_seen_frame = frame_idx
 
-        for tid, arm in arm_map.items():
+        for tid, arm in entry_map.items():
             journey = self.journeys.get(tid)
             if journey is None or journey.completed:
                 continue
-
             if journey.entry_arm is None:
-                # First arm contact → record as entry
                 journey.entry_arm = arm
 
-            elif arm != journey.entry_arm and journey.exit_arm is None:
-                # Different arm → record as exit and classify
+        for tid, arm in exit_map.items():
+            journey = self.journeys.get(tid)
+            if journey is None or journey.completed:
+                continue
+            if journey.entry_arm is not None and journey.exit_arm is None:
                 journey.exit_arm = arm
                 journey.completed = True
                 print(
@@ -267,9 +299,10 @@ class VehicleTracker:
             detections = self.tracker.update_with_detections(detections)
 
             # --- Zone Logic ---
-            arm_map    = self._arm_containing(detections)
+            entry_map  = self._arms_in_entry(detections)
+            exit_map   = self._arms_in_exit(detections)
             active_ids = set(int(t) for t in (detections.tracker_id if detections.tracker_id is not None else []))
-            self._update_journeys(arm_map, active_ids, frame_idx)
+            self._update_journeys(entry_map, exit_map, active_ids, frame_idx)
             self._cleanup_journeys(frame_idx)
 
             # --- Record positions ---
@@ -282,7 +315,9 @@ class VehicleTracker:
 
             # --- Annotate Frame ---
             frame = self._draw_paths(frame, frame_idx)
-            for name, annotator in self.zone_annotators.items():
+            for name, annotator in self.entry_zone_annotators.items():
+                frame = annotator.annotate(scene=frame)
+            for name, annotator in self.exit_zone_annotators.items():
                 frame = annotator.annotate(scene=frame)
 
             labels = self._build_labels(detections)
