@@ -21,6 +21,21 @@ from tracker import DEFAULT_SOURCE_VIDEO, PROJECT_FILE
 
 DEFAULT_ARM_NAMES = ["North", "East", "South", "West"]
 
+# 10 perceptually distinct colors for zone annotation
+ZONE_COLOR_PALETTE = [
+    "#E41A1C",  # red
+    "#377EB8",  # blue
+    "#4DAF4A",  # green
+    "#984EA3",  # purple
+    "#FF7F00",  # orange
+    "#00CED1",  # teal
+    "#F781BF",  # pink
+    "#A65628",  # brown
+    "#FFD700",  # gold
+    "#808080",  # gray
+]
+
+
 def setup_zones_interactively(video_path: str, project_path: str) -> None:
     """
     Opens the first frame of the video and lets you click to define polygon
@@ -52,10 +67,11 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
     print("Click to define polygon vertices. Press ENTER to record, ESC to quit.")
     arm_idx = 0
     arm_names = DEFAULT_ARM_NAMES
-    zones: dict[str, list[list[int]]] = {}
+    zones: dict[str, dict] = {}
 
     while arm_idx < len(arm_names):
-        print(f"\nDefine zone for: {arm_names[arm_idx]}")
+        color = ZONE_COLOR_PALETTE[arm_idx % len(ZONE_COLOR_PALETTE)]
+        print(f"\nDefine zone for: {arm_names[arm_idx]} (color: {color})")
         points.clear()
         frame = clone.copy()
         cv2.imshow("Zone Setup", frame)
@@ -63,7 +79,10 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
         while True:
             key = cv2.waitKey(1) & 0xFF
             if key == 13 and len(points) >= 3:  # ENTER
-                zones[arm_names[arm_idx]] = [list(p) for p in points]
+                zones[arm_names[arm_idx]] = {
+                    "polygon": [list(p) for p in points],
+                    "color": color,
+                }
                 arm_idx += 1
                 break
             elif key == 27:  # ESC

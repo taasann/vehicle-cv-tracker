@@ -46,8 +46,11 @@ TRACK_TIMEOUT_FRAMES = 120
 # Zone Loading
 # ---------------------------------------------------------------------------
 
-def load_zones(path: str) -> dict[str, np.ndarray]:
-    """Load arm polygons from a project.json file."""
+def load_zones(path: str) -> dict[str, dict]:
+    """Load arm zones from a project.json file.
+
+    Returns a dict mapping arm name to {"polygon": np.ndarray, "color": str}.
+    """
     try:
         with open(path) as f:
             data = json.load(f)
@@ -55,12 +58,12 @@ def load_zones(path: str) -> dict[str, np.ndarray]:
         print(f"No {path} found — run setup_zones.py first")
         sys.exit(1)
     return {
-        name: np.array(coords, dtype=np.int32)
-        for name, coords in data["zones"].items()
+        name: {
+            "polygon": np.array(zone["polygon"], dtype=np.int32),
+            "color": zone["color"],
+        }
+        for name, zone in data["zones"].items()
     }
-
-
-ZONE_COLORS = ["#FF5733", "#33FF57", "#3357FF", "#FF33F5", "#FF0000"]
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +90,7 @@ class VehicleTracker:
         self.source_path = source
         self.output_path = output
 
-        arm_polygons = load_zones(project)
+        zone_data = load_zones(project)
 
         # Detection model
         self.model = YOLO(MODEL_PATH)
@@ -96,9 +99,10 @@ class VehicleTracker:
         self.tracker = sv.ByteTrack(lost_track_buffer=90)
 
         # Build PolygonZone objects for each arm
-        self.zones: dict[str, sv.PolygonZone] = {}
-        for arm_name, polygon in arm_polygons.items():
-            self.zones[arm_name] = sv.PolygonZone(polygon=polygon)
+        self.zones: dict[str, sv.PolygonZone] = {
+            name: sv.PolygonZone(polygon=z["polygon"])
+            for name, z in zone_data.items()
+        }
 
         # Per-vehicle journey state
         self.journeys: dict[int, VehicleJourney] = {}
@@ -108,20 +112,17 @@ class VehicleTracker:
         self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
         self.zone_annotators = {
             name: sv.PolygonZoneAnnotator(
-                zone=zone,
-                color=sv.Color.from_hex(color),
+                zone=self.zones[name],
+                color=sv.Color.from_hex(z["color"]),
                 thickness=2,
             )
-            for (name, zone), color in zip(
-                self.zones.items(),
-                ZONE_COLORS,
-            )
+            for name, z in zone_data.items()
         }
 
         # BGR color per arm for path drawing
         self.arm_colors: dict[str, tuple[int, int, int]] = {
-            name: tuple(int(hex_color.lstrip("#")[i:i+2], 16) for i in (4, 2, 0))
-            for name, hex_color in zip(arm_polygons.keys(), ZONE_COLORS)
+            name: tuple(int(z["color"].lstrip("#")[i:i+2], 16) for i in (4, 2, 0))
+            for name, z in zone_data.items()
         }
 
     # ------------------------------------------------------------------

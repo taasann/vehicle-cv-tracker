@@ -35,9 +35,12 @@ Both scripts accept `--project` to use a non-default JSON path.
 ```json
 {
   "zones": {
-    "ArmName": [[x, y], [x, y], ...]
+    "ArmName": {
+      "polygon": [[x, y], [x, y], ...],
+      "color": "#E41A1C"
+    }
   }
 }
 ```
 
-Polygons should cover both entry and exit lanes of each arm. Arm names are arbitrary strings.
+Polygons should cover both entry and exit lanes of each arm. Arm names are arbitrary strings. Colors are hex strings; `setup_zones.py` assigns them automatically from a 10-color palette.
