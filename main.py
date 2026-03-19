@@ -35,7 +35,7 @@ MODEL_PATH   = "yolo26x.pt"
 VEHICLE_CLASS_IDS = [2, 3, 5, 7]
 
 # Confidence threshold for detections
-CONFIDENCE_THRESHOLD = 0.1
+CONFIDENCE_THRESHOLD = 0.05
 
 # How many frames a vehicle must be absent before its journey is "closed"
 TRACK_TIMEOUT_FRAMES = 120
@@ -238,18 +238,20 @@ class RoundaboutTracker:
     # Main Loop
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
+    def run(self, display: bool = False) -> None:
         cap    = cv2.VideoCapture(self.source_path)
         width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps    = cap.get(cv2.CAP_PROP_FPS)
 
-        writer = cv2.VideoWriter(
-            self.output_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps,
-            (width, height),
-        )
+        writer = None
+        if not display:
+            writer = cv2.VideoWriter(
+                self.output_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (width, height),
+            )
 
         frame_idx = 0
         start_time = time.time()
@@ -299,7 +301,12 @@ class RoundaboutTracker:
             )
             # frame  = self._draw_hud(frame)
 
-            writer.write(frame)
+            if display:
+                cv2.imshow("Roundabout Tracker", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            else:
+                writer.write(frame)
 
             if frame_idx > 0 and frame_idx % fps == 0:
                 duration = fps / (time.time() - start_time)
@@ -309,7 +316,10 @@ class RoundaboutTracker:
             frame_idx += 1
 
         cap.release()
-        writer.release()
+        if display:
+            cv2.destroyAllWindows()
+        else:
+            writer.release()
         self._print_summary()
 
     # ------------------------------------------------------------------
@@ -387,10 +397,12 @@ if __name__ == "__main__":
     parser.add_argument("--output",  default=OUTPUT_VIDEO, help="Output video path")
     parser.add_argument("--setup-zones", action="store_true",
                         help="Run interactive zone setup tool instead of tracking")
+    parser.add_argument("--display", action="store_true",
+                        help="Show output in a window instead of writing to file")
     args = parser.parse_args()
 
     if args.setup_zones:
         setup_zones_interactively(args.source)
     else:
         tracker = RoundaboutTracker(source=args.source, output=args.output)
-        tracker.run()
+        tracker.run(display=args.display)
