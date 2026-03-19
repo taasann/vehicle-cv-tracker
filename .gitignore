@@ -11,3 +11,5 @@ wheels/
 
 *.pt
 *.mp4
+
+.idea/

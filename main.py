@@ -27,8 +27,8 @@ from ultralytics import YOLO
 # Configuration
 # ---------------------------------------------------------------------------
 
-SOURCE_VIDEO = "footage.mp4"
-OUTPUT_VIDEO = "output.mp4"
+DEFAULT_SOURCE_VIDEO = "footage.mp4"
+DEFAULT_OUTPUT_VIDEO = "output.mp4"
 MODEL_PATH   = "yolo26x.pt"
 
 # COCO class IDs for vehicles (car, motorcycle, bus, truck)
@@ -94,7 +94,7 @@ class VehicleJourney:
 # Main Tracker
 # ---------------------------------------------------------------------------
 
-class RoundaboutTracker:
+class VehicleTracker:
     def __init__(self, source: str, output: str):
         self.source_path = source
         self.output_path = output
@@ -331,78 +331,16 @@ class RoundaboutTracker:
 
 
 # ---------------------------------------------------------------------------
-# Zone Setup Helper  (run this first to find your polygon coordinates)
-# ---------------------------------------------------------------------------
-
-def setup_zones_interactively(video_path: str) -> None:
-    """
-    Opens the first frame of the video and lets you click to define polygon
-    vertices for each arm. Press ENTER to finish a polygon, ESC to quit.
-    Prints the resulting numpy arrays to copy into ARM_POLYGONS.
-    """
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        print("Could not read video.")
-        return
-
-    points: list[tuple[int, int]] = []
-    clone = frame.copy()
-
-    def mouse_callback(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            points.append((x, y))
-            cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
-            if len(points) > 1:
-                cv2.line(frame, points[-2], points[-1], (0, 255, 0), 2)
-            cv2.imshow("Zone Setup", frame)
-
-    cv2.namedWindow("Zone Setup")
-    cv2.setMouseCallback("Zone Setup", mouse_callback)
-    cv2.imshow("Zone Setup", frame)
-
-    print("Click to define polygon vertices. Press ENTER to record, ESC to quit.")
-    arm_idx = 0
-    arm_names = ARM_ORDER
-
-    while arm_idx < len(arm_names):
-        print(f"\nDefine zone for: {arm_names[arm_idx]}")
-        points.clear()
-        frame = clone.copy()
-        cv2.imshow("Zone Setup", frame)
-
-        while True:
-            key = cv2.waitKey(1) & 0xFF
-            if key == 13 and len(points) >= 3:  # ENTER
-                arr = np.array(points)
-                print(f'    "{arm_names[arm_idx]}": np.array({arr.tolist()}),')
-                arm_idx += 1
-                break
-            elif key == 27:  # ESC
-                cv2.destroyAllWindows()
-                return
-
-    cv2.destroyAllWindows()
-    print("\nCopy the above into ARM_POLYGONS in roundabout_tracker.py")
-
-
-# ---------------------------------------------------------------------------
 # Entry Point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Roundabout vehicle maneuver tracker")
-    parser.add_argument("--source",  default=SOURCE_VIDEO, help="Input video path")
-    parser.add_argument("--output",  default=OUTPUT_VIDEO, help="Output video path")
-    parser.add_argument("--setup-zones", action="store_true",
-                        help="Run interactive zone setup tool instead of tracking")
+    parser.add_argument("--source", default=DEFAULT_SOURCE_VIDEO, help="Input video path")
+    parser.add_argument("--output", default=DEFAULT_OUTPUT_VIDEO, help="Output video path")
     parser.add_argument("--display", action="store_true",
                         help="Show output in a window instead of writing to file")
     args = parser.parse_args()
 
-    if args.setup_zones:
-        setup_zones_interactively(args.source)
-    else:
-        tracker = RoundaboutTracker(source=args.source, output=args.output)
-        tracker.run(display=args.display)
+    tracker = VehicleTracker(source=args.source, output=args.output)
+    tracker.run(display=args.display)
