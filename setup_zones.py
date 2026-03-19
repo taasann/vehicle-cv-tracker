@@ -4,7 +4,7 @@ Zone Setup Tool
 Run this script once to interactively define the arm polygons for your footage.
 Click polygon vertices on the first frame of the video, press ENTER to record
 each arm. The resulting zones are saved to project.json (or a custom path via
---project) and loaded automatically by main.py.
+--project) and loaded automatically by tracker.py.
 
 Usage:
     python setup_zones.py
@@ -16,9 +16,8 @@ import argparse
 import json
 
 import cv2
-import numpy as np
 
-from main import DEFAULT_SOURCE_VIDEO, PROJECT_FILE
+from tracker import DEFAULT_SOURCE_VIDEO, PROJECT_FILE
 
 DEFAULT_ARM_NAMES = ["North", "East", "South", "West"]
 
