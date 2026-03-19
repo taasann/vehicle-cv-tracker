@@ -41,6 +41,11 @@ CONFIDENCE_THRESHOLD = 0.05
 # How many frames a vehicle must be absent before its journey is "closed"
 TRACK_TIMEOUT_FRAMES = 120
 
+# Orphan re-linking: max pixel distance to match a new track to a recently-lost journey
+ORPHAN_RELINK_DISTANCE = 120
+# How long to keep an orphaned journey available for re-linking (frames)
+ORPHAN_RELINK_MAX_FRAMES = 60
+
 
 # ---------------------------------------------------------------------------
 # Zone Loading
@@ -103,7 +108,7 @@ class VehicleTracker:
         self.model = YOLO(MODEL_PATH)
 
         # ByteTrack tracker
-        self.tracker = sv.ByteTrack(lost_track_buffer=90)
+        self.tracker = sv.ByteTrack(lost_track_buffer=300)
 
         # Build PolygonZone objects for entry and exit polygons per arm
         self.entry_zones: dict[str, sv.PolygonZone] = {
@@ -117,6 +122,10 @@ class VehicleTracker:
 
         # Per-vehicle journey state
         self.journeys: dict[int, VehicleJourney] = {}
+
+        # Incomplete journeys that timed out, kept briefly for re-linking
+        # Each entry: (journey, last_position, frame_when_orphaned)
+        self.orphaned_journeys: list[tuple[VehicleJourney, tuple[int, int], int]] = []
 
         # Annotators for visualisation
         self.box_annotator   = sv.BoxAnnotator(thickness=2)
@@ -214,6 +223,68 @@ class VehicleTracker:
                     f"{journey.entry_arm} → {journey.exit_arm} "
                 )
 
+    def _relink_orphans(self, detections: sv.Detections, frame_idx: int) -> None:
+        """Match new track IDs to recently-lost incomplete journeys by proximity.
+
+        A new track that appears close to where an orphaned journey was last seen
+        inherits that journey's state (entry arm, path, etc.) rather than starting
+        a blank journey.
+        """
+        if not self.orphaned_journeys:
+            return
+
+        # Expire stale orphans first
+        self.orphaned_journeys = [
+            (j, pos, f) for j, pos, f in self.orphaned_journeys
+            if frame_idx - f <= ORPHAN_RELINK_MAX_FRAMES
+        ]
+
+        if detections.tracker_id is None:
+            return
+
+        for i, tid in enumerate(detections.tracker_id):
+            tid = int(tid)
+            if tid in self.journeys:
+                continue  # already known
+
+            x1, y1, x2, y2 = detections.xyxy[i]
+            cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+
+            best_idx, best_dist = -1, ORPHAN_RELINK_DISTANCE
+            for oi, (_, last_pos, _) in enumerate(self.orphaned_journeys):
+                dist = ((cx - last_pos[0]) ** 2 + (cy - last_pos[1]) ** 2) ** 0.5
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = oi
+
+            if best_idx >= 0:
+                orphan, _, _ = self.orphaned_journeys.pop(best_idx)
+                orphan.track_id = tid
+                orphan.last_seen_frame = frame_idx
+                self.journeys[tid] = orphan
+                print(
+                    f"[Frame {frame_idx}] Re-linked track {tid} to orphaned journey "
+                    f"(entry={orphan.entry_arm}, dist={best_dist:.0f}px)"
+                )
+
+    def _orphan_lost_tracks(self, active_ids: set[int], frame_idx: int) -> None:
+        """Immediately orphan incomplete journeys whose track ID is no longer active.
+
+        Called every frame so re-linking can happen as soon as the replacement
+        track ID appears, without waiting for TRACK_TIMEOUT_FRAMES.
+        """
+        lost = [
+            tid for tid, journey in self.journeys.items()
+            if tid not in active_ids
+            and not journey.completed
+            and journey.entry_arm is not None
+            and journey.positions
+        ]
+        for tid in lost:
+            journey = self.journeys.pop(tid)
+            self.orphaned_journeys.append((journey, journey.positions[-1], frame_idx))
+            print(f"[Frame {frame_idx}] Orphaned track {tid} (entry={journey.entry_arm})")
+
     def _cleanup_journeys(self, frame_idx: int) -> None:
         """Remove journeys that have not been seen for TRACK_TIMEOUT_FRAMES frames."""
         timed_out = [
@@ -222,9 +293,9 @@ class VehicleTracker:
             if frame_idx - journey.last_seen_frame > TRACK_TIMEOUT_FRAMES
         ]
         for tid in timed_out:
-            print("Deleting journey", tid)
-
-            del self.journeys[tid]
+            journey = self.journeys.pop(tid)
+            if not journey.completed:
+                print(f"Deleting journey {tid}, entry={journey.entry_arm} exit={journey.exit_arm} completed={journey.completed}")
 
     # ------------------------------------------------------------------
     # Annotation
@@ -302,7 +373,9 @@ class VehicleTracker:
             entry_map  = self._arms_in_entry(detections)
             exit_map   = self._arms_in_exit(detections)
             active_ids = set(int(t) for t in (detections.tracker_id if detections.tracker_id is not None else []))
+            self._relink_orphans(detections, frame_idx)
             self._update_journeys(entry_map, exit_map, active_ids, frame_idx)
+            self._orphan_lost_tracks(active_ids, frame_idx)
             self._cleanup_journeys(frame_idx)
 
             # --- Record positions ---
