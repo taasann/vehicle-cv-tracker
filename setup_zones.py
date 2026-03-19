@@ -3,24 +3,30 @@ Zone Setup Tool
 ===============
 Run this script once to interactively define the arm polygons for your footage.
 Click polygon vertices on the first frame of the video, press ENTER to record
-each arm, and copy the printed numpy arrays into ARM_POLYGONS in main.py.
+each arm. The resulting zones are saved to project.json (or a custom path via
+--project) and loaded automatically by main.py.
 
 Usage:
     python setup_zones.py
     python setup_zones.py --video roundabout.mp4
+    python setup_zones.py --project custom.json
 """
+
+import argparse
+import json
 
 import cv2
 import numpy as np
 
-from main import DEFAULT_SOURCE_VIDEO, ARM_ORDER
+from main import DEFAULT_SOURCE_VIDEO, PROJECT_FILE
 
+DEFAULT_ARM_NAMES = ["North", "East", "South", "West"]
 
-def setup_zones_interactively(video_path: str) -> None:
+def setup_zones_interactively(video_path: str, project_path: str) -> None:
     """
     Opens the first frame of the video and lets you click to define polygon
     vertices for each arm. Press ENTER to finish a polygon, ESC to quit.
-    Prints the resulting numpy arrays to copy into ARM_POLYGONS.
+    Saves the resulting zones to project_path as JSON.
     """
     cap = cv2.VideoCapture(video_path)
     ret, frame = cap.read()
@@ -46,7 +52,8 @@ def setup_zones_interactively(video_path: str) -> None:
 
     print("Click to define polygon vertices. Press ENTER to record, ESC to quit.")
     arm_idx = 0
-    arm_names = ARM_ORDER
+    arm_names = DEFAULT_ARM_NAMES
+    zones: dict[str, list[list[int]]] = {}
 
     while arm_idx < len(arm_names):
         print(f"\nDefine zone for: {arm_names[arm_idx]}")
@@ -57,8 +64,7 @@ def setup_zones_interactively(video_path: str) -> None:
         while True:
             key = cv2.waitKey(1) & 0xFF
             if key == 13 and len(points) >= 3:  # ENTER
-                arr = np.array(points)
-                print(f'    "{arm_names[arm_idx]}": np.array({arr.tolist()}),')
+                zones[arm_names[arm_idx]] = [list(p) for p in points]
                 arm_idx += 1
                 break
             elif key == 27:  # ESC
@@ -66,12 +72,15 @@ def setup_zones_interactively(video_path: str) -> None:
                 return
 
     cv2.destroyAllWindows()
-    print("\nCopy the above into ARM_POLYGONS in main.py")
+
+    with open(project_path, "w") as f:
+        json.dump({"zones": zones}, f, indent=2)
+    print(f"\nSaved zones to {project_path}")
 
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser(description="Interactive zone setup tool")
     parser.add_argument("--video", default=DEFAULT_SOURCE_VIDEO)
+    parser.add_argument("--project", default=PROJECT_FILE, help="Output project JSON path")
     args = parser.parse_args()
-    setup_zones_interactively(args.video)
+    setup_zones_interactively(args.video, args.project)

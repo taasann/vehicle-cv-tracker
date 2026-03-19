@@ -12,10 +12,10 @@ Usage:
 """
 
 import argparse
+import json
+import sys
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum
 
 import cv2
 import numpy as np
@@ -30,6 +30,7 @@ from ultralytics import YOLO
 DEFAULT_SOURCE_VIDEO = "footage.mp4"
 DEFAULT_OUTPUT_VIDEO = "output.mp4"
 MODEL_PATH   = "yolo26x.pt"
+PROJECT_FILE = "project.json"
 
 # COCO class IDs for vehicles (car, motorcycle, bus, truck)
 VEHICLE_CLASS_IDS = [2, 3, 5, 7]
@@ -42,37 +43,24 @@ TRACK_TIMEOUT_FRAMES = 120
 
 
 # ---------------------------------------------------------------------------
-# Roundabout Geometry
+# Zone Loading
 # ---------------------------------------------------------------------------
-# Define one polygon per road arm of the roundabout.
-# Each polygon should cover the entry AND exit lanes of that arm.
-#
-# !! You must update these coordinates to match your footage. !!
-# Tip: Run `python setup_zones.py` (see bottom of file) to pick coordinates
-# interactively by clicking on a reference frame.
-#
-# Arm ordering matters for maneuver classification — keep it consistent.
-# Example layout (4-arm roundabout, arms numbered clockwise from North):
-#
-#          ARM 0 (North)
-#              |
-#  ARM 3 ---- O ---- ARM 1 (East)
-#  (West)     |
-#          ARM 2 (South)
 
-ARM_POLYGONS = {
-    "NE": np.array([[973, 260], [1200, 440], [1312, 221], [1162, 129], [1096, 218], [974, 260]]),
-    "SE": np.array([[1233, 554], [1099, 754], [1181, 764], [1318, 879], [1417, 776], [1336, 701], [1268, 624], [1235, 556]]),
-    "S": np.array([[679, 758], [866, 761], [927, 762], [1027, 800], [970, 855], [949, 918], [942, 1011], [797, 1012], [797, 881], [780, 837], [743, 794], [679, 760]]),
-    "W": np.array([[727, 506], [766, 657], [686, 763], [623, 758], [468, 769], [456, 642], [574, 628], [634, 603], [725, 513]]),
-    "NW": np.array([[559, 257], [648, 147], [794, 244], [913, 274], [809, 355], [721, 438], [685, 354], [560, 260]]),
-}
+def load_zones(path: str) -> dict[str, np.ndarray]:
+    """Load arm polygons from a project.json file."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print(f"No {path} found — run setup_zones.py first")
+        sys.exit(1)
+    return {
+        name: np.array(coords, dtype=np.int32)
+        for name, coords in data["zones"].items()
+    }
+
 
 ZONE_COLORS = ["#FF5733", "#33FF57", "#3357FF", "#FF33F5", "#FF0000"]
-
-# Clockwise ordering of arms — used to determine turn direction
-ARM_ORDER = ["North", "East", "South", "West", "Extra"]
-
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +83,11 @@ class VehicleJourney:
 # ---------------------------------------------------------------------------
 
 class VehicleTracker:
-    def __init__(self, source: str, output: str):
+    def __init__(self, source: str, output: str, project: str = PROJECT_FILE):
         self.source_path = source
         self.output_path = output
+
+        arm_polygons = load_zones(project)
 
         # Detection model
         self.model = YOLO(MODEL_PATH)
@@ -107,7 +97,7 @@ class VehicleTracker:
 
         # Build PolygonZone objects for each arm
         self.zones: dict[str, sv.PolygonZone] = {}
-        for arm_name, polygon in ARM_POLYGONS.items():
+        for arm_name, polygon in arm_polygons.items():
             self.zones[arm_name] = sv.PolygonZone(polygon=polygon)
 
         # Per-vehicle journey state
@@ -131,7 +121,7 @@ class VehicleTracker:
         # BGR color per arm for path drawing
         self.arm_colors: dict[str, tuple[int, int, int]] = {
             name: tuple(int(hex_color.lstrip("#")[i:i+2], 16) for i in (4, 2, 0))
-            for name, hex_color in zip(ARM_POLYGONS.keys(), ZONE_COLORS)
+            for name, hex_color in zip(arm_polygons.keys(), ZONE_COLORS)
         }
 
     # ------------------------------------------------------------------
@@ -338,9 +328,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Roundabout vehicle maneuver tracker")
     parser.add_argument("--source", default=DEFAULT_SOURCE_VIDEO, help="Input video path")
     parser.add_argument("--output", default=DEFAULT_OUTPUT_VIDEO, help="Output video path")
+    parser.add_argument("--project", default=PROJECT_FILE, help="Project JSON file with zone definitions")
     parser.add_argument("--display", action="store_true",
                         help="Show output in a window instead of writing to file")
     args = parser.parse_args()
 
-    tracker = VehicleTracker(source=args.source, output=args.output)
+    tracker = VehicleTracker(source=args.source, output=args.output, project=args.project)
     tracker.run(display=args.display)
