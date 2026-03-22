@@ -11,6 +11,8 @@ wheels/
 
 *.pt
 *.mp4
+*.webm
+*.mkv
 
 .idea/
 
