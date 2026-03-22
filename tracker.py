@@ -29,11 +29,11 @@ from ultralytics import YOLO
 
 DEFAULT_SOURCE_VIDEO = "footage.mp4"
 DEFAULT_OUTPUT_VIDEO = "output.mp4"
-MODEL_PATH   = "yolo26x.pt"
+MODEL_PATH   = "yolo26x-obb.pt"
 PROJECT_FILE = "project.json"
 
 # COCO class IDs for vehicles (car, motorcycle, bus, truck)
-VEHICLE_CLASS_IDS = [2, 3, 5, 7]
+VEHICLE_CLASS_IDS = [9, 10]
 
 # Confidence threshold for detections
 CONFIDENCE_THRESHOLD = 0.05
@@ -128,8 +128,11 @@ class VehicleTracker:
         self.orphaned_journeys: list[tuple[VehicleJourney, tuple[int, int], int]] = []
 
         # Annotators for visualisation
-        self.box_annotator   = sv.BoxAnnotator(thickness=2)
-        self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
+        self.box_annotator        = sv.BoxAnnotator(thickness=2)
+        self.label_annotator      = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
+        self.yolo_debug_annotator = sv.BoxAnnotator(
+            thickness=2, color=sv.Color.from_hex("#FFFF00")
+        )
         self.entry_zone_annotators = {
             name: sv.PolygonZoneAnnotator(
                 zone=self.entry_zones[name],
@@ -332,7 +335,7 @@ class VehicleTracker:
     # Main Loop
     # ------------------------------------------------------------------
 
-    def run(self, display: bool = False) -> None:
+    def run(self, display: bool = False, debug_yolo: bool = False) -> None:
         cap    = cv2.VideoCapture(self.source_path)
         width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -365,6 +368,7 @@ class VehicleTracker:
             )[0]
 
             detections = sv.Detections.from_ultralytics(results)
+            raw_detections = detections if debug_yolo else None
 
             # --- Tracking ---
             detections = self.tracker.update_with_detections(detections)
@@ -376,7 +380,7 @@ class VehicleTracker:
             self._relink_orphans(detections, frame_idx)
             self._update_journeys(entry_map, exit_map, active_ids, frame_idx)
             self._orphan_lost_tracks(active_ids, frame_idx)
-            self._cleanup_journeys(frame_idx)
+            # self._cleanup_journeys(frame_idx)
 
             # --- Record positions ---
             for i, tid in enumerate(detections.tracker_id if detections.tracker_id is not None else []):
@@ -393,11 +397,24 @@ class VehicleTracker:
             for name, annotator in self.exit_zone_annotators.items():
                 frame = annotator.annotate(scene=frame)
 
-            labels = self._build_labels(detections)
-            frame  = self.box_annotator.annotate(scene=frame, detections=detections)
-            frame  = self.label_annotator.annotate(
-                scene=frame, detections=detections, labels=labels
-            )
+            if debug_yolo and raw_detections is not None:
+                labels = [
+                    f"{class_name} {confidence*100:.0f}%"
+                    for class_name, confidence
+                    in zip(raw_detections['class_name'], raw_detections.confidence)
+                ]
+
+                frame = self.yolo_debug_annotator.annotate(scene=frame, detections=raw_detections)
+                frame = self.box_annotator.annotate(scene=frame, detections=detections)
+                frame  = self.label_annotator.annotate(
+                    scene=frame, detections=raw_detections, labels=labels
+                )
+            else:
+                labels = self._build_labels(detections)
+                frame  = self.box_annotator.annotate(scene=frame, detections=detections)
+                frame  = self.label_annotator.annotate(
+                    scene=frame, detections=detections, labels=labels
+                )
             # frame  = self._draw_hud(frame)
 
             if display:
@@ -440,7 +457,9 @@ if __name__ == "__main__":
     parser.add_argument("--project", default=PROJECT_FILE, help="Project JSON file with zone definitions")
     parser.add_argument("--display", action="store_true",
                         help="Show output in a window instead of writing to file")
+    parser.add_argument("--debug-yolo", action="store_true",
+                        help="Overlay raw YOLO detections (yellow) before ByteTrack filtering")
     args = parser.parse_args()
 
     tracker = VehicleTracker(source=args.source, output=args.output, project=args.project)
-    tracker.run(display=args.display)
+    tracker.run(display=args.display, debug_yolo=args.debug_yolo)
