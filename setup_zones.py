@@ -20,7 +20,7 @@ import numpy as np
 
 from tracker import DEFAULT_SOURCE_VIDEO, PROJECT_FILE
 
-DEFAULT_ARM_NAMES = ["NE", "E", "S", "W", "NW"]
+DEFAULT_ARM_NAMES = ["Linn", "Jarveotsa", "Paldiski"]
 
 # 10 perceptually distinct colors for zone annotation
 ZONE_COLOR_PALETTE = [
@@ -104,11 +104,31 @@ def draw_completed_zone(
     cv2.polylines(background, [poly], isClosed=True, color=color_bgr, thickness=thickness)
 
 
+def get_display_scale(frame_w: int, frame_h: int) -> float:
+    """Return a scale factor (<= 1.0) so the frame fits within the screen."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        root.destroy()
+    except Exception:
+        screen_w, screen_h = 1920, 1080
+    # Leave some headroom for window chrome / taskbar
+    margin = 0.92
+    return min(screen_w * margin / frame_w, screen_h * margin / frame_h, 1.0)
+
+
+
 def setup_zones_interactively(video_path: str, project_path: str) -> None:
     """
     Opens the first frame of the video and lets you click to define polygon
     vertices for each arm. Press ENTER to finish a polygon, ESC to quit.
     Saves the resulting zones to project_path as JSON.
+
+    The window is scaled to fit within the display, but stored coordinates are
+    always in the original video resolution.
     """
     cap = cv2.VideoCapture(video_path)
     ret, base_frame = cap.read()
@@ -117,9 +137,15 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
         print("Could not read video.")
         return
 
-    # background accumulates completed zone outlines between arms
+    frame_h, frame_w = base_frame.shape[:2]
+    scale = get_display_scale(frame_w, frame_h)
+    display_w = int(frame_w * scale)
+    display_h = int(frame_h * scale)
+
+    # background accumulates completed zone outlines (original resolution)
     background = base_frame.copy()
 
+    # points stored in original resolution
     points: list[tuple[int, int]] = []
     arm_idx = 0
     arm_names = DEFAULT_ARM_NAMES
@@ -130,10 +156,14 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
 
     def mouse_callback(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
-            points.append((x, y))
+            # Map display coordinates back to original resolution
+            orig_x = int(x / scale)
+            orig_y = int(y / scale)
+            points.append((orig_x, orig_y))
             state["redraw"] = True
 
-    cv2.namedWindow("Zone Setup")
+    cv2.namedWindow("Zone Setup", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Zone Setup", display_w, display_h)
     cv2.setMouseCallback("Zone Setup", mouse_callback)
 
     while arm_idx < len(arm_names):
@@ -153,7 +183,8 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
                     draw_status_bar(frame, arm_name, color_bgr,
                                     len(points), arm_idx, len(arm_names),
                                     polygon_role=polygon_role)
-                    cv2.imshow("Zone Setup", frame)
+                    display = cv2.resize(frame, (display_w, display_h))
+                    cv2.imshow("Zone Setup", display)
                     state["redraw"] = False
 
                 key = cv2.waitKey(20) & 0xFF
@@ -186,7 +217,8 @@ def setup_zones_interactively(video_path: str, project_path: str) -> None:
                 (8, h - 34), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 1, cv2.LINE_AA)
     cv2.putText(frame, "Press any key to close.",
                 (8, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
-    cv2.imshow("Zone Setup", frame)
+    display = cv2.resize(frame, (display_w, display_h))
+    cv2.imshow("Zone Setup", display)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
